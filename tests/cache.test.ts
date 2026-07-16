@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { memoryCache, normalizeText } from "../src/cache.js";
 import { createModerator } from "../src/moderator.js";
 import { mockProvider } from "../src/providers/mock.js";
+import { ModerationCache, Verdict } from "../src/types.js";
 
 describe("Cache", () => {
   describe("normalizeText", () => {
@@ -149,13 +150,13 @@ describe("Cache", () => {
       const customCache = {
         async get(key: string) {
           await Promise.resolve();
-          return store.get(key) || null;
+          return (store.get(key) as Verdict) || null;
         },
-        async set(key: string, value: unknown) {
+        async set(key: string, value: Verdict) {
           await Promise.resolve();
           store.set(key, value);
         },
-      };
+      } satisfies ModerationCache;
 
       const provider = mockProvider({
         hello: { action: "allow", confidence: 0.99 },
