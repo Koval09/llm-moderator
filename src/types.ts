@@ -1,3 +1,16 @@
+import { z } from "zod";
+
+export const RawVerdictSchema = z.object({
+  action: z.enum(["allow", "flag", "block"]),
+  category: z
+    .string()
+    .nullish()
+    .transform((v) => v ?? undefined),
+  confidence: z.number(),
+});
+
+export const RawVerdictArraySchema = z.array(RawVerdictSchema);
+
 export type ModerationAction = "allow" | "flag" | "block";
 
 export type VerdictSource =
