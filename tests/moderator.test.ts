@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createModerator } from "../src/moderator.js";
 import { mockProvider } from "../src/providers/mock.js";
 import { ModerationProvider, ModerationAction } from "../src/types.js";
+import { memoryCache } from "../src/cache.js";
 
 describe("Moderator", () => {
   const defaultPolicy = {
@@ -30,6 +31,8 @@ describe("Moderator", () => {
     expect(stats.checked).toBe(1);
     expect(stats.apiCalls).toBe(1);
     expect(stats.errors).toBe(0);
+    expect(stats.estimatedInputTokens).toBeGreaterThan(0);
+    expect(stats.estimatedOutputTokens).toBe(20);
   });
 
   it("retries once after invalid JSON/malformed response and succeeds on second try", async () => {
@@ -39,7 +42,6 @@ describe("Moderator", () => {
       async moderateBatch(_texts, _compiledPolicy) {
         callCount++;
         if (callCount === 1) {
-          // return invalid response
           return [{ action: "invalid-action" as unknown as ModerationAction, confidence: -1 }];
         }
         return [{ action: "allow", confidence: 0.9 }];
@@ -61,8 +63,8 @@ describe("Moderator", () => {
 
     const stats = moderator.stats();
     expect(stats.checked).toBe(1);
-    expect(stats.apiCalls).toBe(2); // 1 initial + 1 retry
-    expect(stats.errors).toBe(1); // 1 error from the first transient failure
+    expect(stats.apiCalls).toBe(2);
+    expect(stats.errors).toBe(1);
   });
 
   it("switches to the second provider on error of the first (source: fallback-provider)", async () => {
@@ -89,9 +91,9 @@ describe("Moderator", () => {
 
     const stats = moderator.stats();
     expect(stats.checked).toBe(1);
-    expect(stats.apiCalls).toBe(3); // 2 primary calls (initial + retry) + 1 fallback call
+    expect(stats.apiCalls).toBe(3); // 2 primary + 1 fallback
     expect(stats.fallbackProviderCalls).toBe(1);
-    expect(stats.errors).toBe(2); // 2 primary errors
+    expect(stats.errors).toBe(2);
   });
 
   it("respects the correct order of fallback providers", async () => {
@@ -122,11 +124,8 @@ describe("Moderator", () => {
 
     const stats = moderator.stats();
     expect(stats.checked).toBe(1);
-    // primary (2) + fallback1 (2) + fallback2 (1) = 5 apiCalls
-    expect(stats.apiCalls).toBe(5);
-    // fallback1 (2) + fallback2 (1) = 3 fallbackProviderCalls
+    expect(stats.apiCalls).toBe(5); // 2 primary + 2 fallback1 + 1 fallback2
     expect(stats.fallbackProviderCalls).toBe(3);
-    // primary errors (2) + fallback1 errors (2) = 4 errors
     expect(stats.errors).toBe(4);
   });
 
@@ -134,7 +133,6 @@ describe("Moderator", () => {
     const primary = mockProvider({ hello: "error" });
     const fallback = mockProvider({ hello: "error" });
 
-    // fail-open test (default)
     const moderatorOpen = createModerator({
       provider: primary,
       fallbackProviders: [fallback],
@@ -149,7 +147,6 @@ describe("Moderator", () => {
       source: "error-fallback",
     });
 
-    // fail-closed test
     const moderatorClosed = createModerator({
       provider: primary,
       fallbackProviders: [fallback],
@@ -165,6 +162,186 @@ describe("Moderator", () => {
     });
 
     const stats = moderatorClosed.stats();
-    expect(stats.errors).toBe(4); // primary (2) + fallback (2)
+    expect(stats.errors).toBe(4);
+  });
+
+  describe("Escalation", () => {
+    it("escalates when confidence is below threshold and returns escalation source", async () => {
+      const primary = mockProvider({
+        maybeBad: { action: "flag", confidence: 0.5 },
+      });
+      const escalationTo = mockProvider({
+        maybeBad: { action: "block", category: "slurs", confidence: 0.95 },
+      });
+
+      const moderator = createModerator({
+        provider: primary,
+        policy: defaultPolicy,
+        escalation: {
+          toProvider: escalationTo,
+          whenConfidenceBelow: 0.8,
+        },
+      });
+
+      const result = await moderator.check({ text: "maybeBad" });
+      expect(result).toEqual({
+        action: "block",
+        category: "slurs",
+        confidence: 0.95,
+        source: "escalation",
+      });
+
+      const stats = moderator.stats();
+      expect(stats.checked).toBe(1);
+      expect(stats.apiCalls).toBe(2); // 1 primary + 1 escalation
+      expect(stats.escalations).toBe(1);
+      expect(stats.fallbackProviderCalls).toBe(0);
+    });
+
+    it("does not escalate when confidence is at or above threshold", async () => {
+      const primary = mockProvider({
+        sureGood: { action: "allow", confidence: 0.8 },
+      });
+      const escalationTo = mockProvider({
+        sureGood: { action: "block", confidence: 0.95 },
+      });
+
+      const moderator = createModerator({
+        provider: primary,
+        policy: defaultPolicy,
+        escalation: {
+          toProvider: escalationTo,
+          whenConfidenceBelow: 0.8,
+        },
+      });
+
+      const result = await moderator.check({ text: "sureGood" });
+      expect(result).toEqual({
+        action: "allow",
+        category: undefined,
+        confidence: 0.8,
+        source: "primary",
+      });
+
+      const stats = moderator.stats();
+      expect(stats.checked).toBe(1);
+      expect(stats.apiCalls).toBe(1); // Only primary
+      expect(stats.escalations).toBe(0);
+    });
+
+    it("keeps primary verdict if the escalation provider fails", async () => {
+      const primary = mockProvider({
+        maybeBad: { action: "flag", confidence: 0.5 },
+      });
+      const escalationTo = mockProvider({
+        maybeBad: "error",
+      });
+
+      const moderator = createModerator({
+        provider: primary,
+        policy: defaultPolicy,
+        escalation: {
+          toProvider: escalationTo,
+          whenConfidenceBelow: 0.8,
+        },
+      });
+
+      const result = await moderator.check({ text: "maybeBad" });
+      // Remains primary verdict
+      expect(result).toEqual({
+        action: "flag",
+        category: undefined,
+        confidence: 0.5,
+        source: "primary",
+      });
+
+      const stats = moderator.stats();
+      expect(stats.checked).toBe(1);
+      expect(stats.apiCalls).toBe(3); // 1 primary + 2 escalation attempts (initial + retry)
+      expect(stats.escalations).toBe(1);
+      expect(stats.errors).toBe(2); // 2 escalation failures
+    });
+  });
+
+  describe("Statistics collection sequence", () => {
+    it("accumulates all stats correctly across different scenarios", async () => {
+      const primary = mockProvider({
+        clean: { action: "allow", confidence: 0.95 },
+        suspicious: { action: "flag", confidence: 0.4 },
+        broken: "error",
+        ultimateFail: "error",
+      });
+
+      const fallback = mockProvider({
+        broken: { action: "allow", confidence: 0.8 },
+        ultimateFail: "error",
+      });
+
+      const escalationTo = mockProvider({
+        suspicious: { action: "block", confidence: 0.99 },
+      });
+
+      const cache = memoryCache({ ttlMs: 1000 });
+
+      const moderator = createModerator({
+        provider: primary,
+        fallbackProviders: [fallback],
+        escalation: {
+          toProvider: escalationTo,
+          whenConfidenceBelow: 0.8,
+        },
+        cache,
+        policy: defaultPolicy,
+        onError: "block",
+      });
+
+      // 1. Success check (primary) -> write to cache
+      const r1 = await moderator.check({ text: "clean" });
+      expect(r1.source).toBe("primary");
+
+      // 2. Cache hit (cached)
+      const r2 = await moderator.check({ text: "clean" });
+      expect(r2.source).toBe("cache");
+
+      // 3. Escalated check (primary -> escalation) -> write to cache
+      const r3 = await moderator.check({ text: "suspicious" });
+      expect(r3.source).toBe("escalation");
+
+      // 4. Primary fail -> Fallback success -> write to cache
+      const r4 = await moderator.check({ text: "broken" });
+      expect(r4.source).toBe("fallback-provider");
+
+      // 5. Ultimate fail -> all fail -> onError -> do NOT write to cache
+      const r5 = await moderator.check({ text: "ultimateFail" });
+      expect(r5.source).toBe("error-fallback");
+
+      const stats = moderator.stats();
+
+      expect(stats.checked).toBe(5);
+      expect(stats.cacheHits).toBe(1);
+      // Calls details:
+      // Scenario 1: 1 call to primary
+      // Scenario 2: 0 calls (cache hit)
+      // Scenario 3: 1 call to primary + 1 call to escalation = 2 calls
+      // Scenario 4: 2 calls to primary (fail, retry) + 1 call to fallback = 3 calls
+      // Scenario 5: 2 calls to primary (fail, retry) + 2 calls to fallback (fail, retry) = 4 calls
+      // Total API calls = 1 + 0 + 2 + 3 + 4 = 10
+      expect(stats.apiCalls).toBe(10);
+      expect(stats.batches).toBe(0); // batch not configured
+      expect(stats.escalations).toBe(1);
+      // Fallback calls:
+      // Scenario 4: 1 call
+      // Scenario 5: 2 calls
+      // Total = 3 fallback provider calls
+      expect(stats.fallbackProviderCalls).toBe(3);
+      // Errors details:
+      // Scenario 4: 2 errors (primary failed twice)
+      // Scenario 5: 2 errors (primary failed twice) + 2 errors (fallback failed twice) = 4 errors
+      // Total errors = 2 + 4 = 6
+      expect(stats.errors).toBe(6);
+
+      expect(stats.estimatedInputTokens).toBeGreaterThan(0);
+      expect(stats.estimatedOutputTokens).toBe(10 * 20); // 10 apiCalls * 20 tokens/call
+    });
   });
 });

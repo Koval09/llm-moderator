@@ -39,15 +39,20 @@ class ModeratorImpl implements Moderator {
         maxSize: this.config.batch!.maxSize,
         maxWaitMs: this.config.batch!.maxWaitMs,
         compiledPolicy: this.compiledPolicy,
-        onApiCall: (success: boolean) => {
+        onApiCall: (success: boolean, textCount: number, totalTextLength: number) => {
           this.statsStore.apiCalls++;
           this.statsStore.batches++;
-          if (provider !== this.config.provider) {
+          const isFallback = this.config.fallbackProviders?.includes(provider) ?? false;
+          if (isFallback) {
             this.statsStore.fallbackProviderCalls++;
           }
           if (!success) {
             this.statsStore.errors++;
           }
+          this.statsStore.estimatedInputTokens += Math.ceil(
+            (this.compiledPolicy.length + totalTextLength) / 4
+          );
+          this.statsStore.estimatedOutputTokens += 20 * textCount;
         },
       });
       this.batchers.set(provider, batcher);
@@ -91,10 +96,15 @@ class ModeratorImpl implements Moderator {
             rawVerdict = await batcher.add(params.text);
           } else {
             // Direct call (no batching)
-            if (!isPrimary) {
+            const isFallback = this.config.fallbackProviders?.includes(provider) ?? false;
+            if (isFallback) {
               this.statsStore.fallbackProviderCalls++;
             }
             this.statsStore.apiCalls++;
+            this.statsStore.estimatedInputTokens += Math.ceil(
+              (this.compiledPolicy.length + params.text.length) / 4
+            );
+            this.statsStore.estimatedOutputTokens += 20;
 
             try {
               const results = await provider.moderateBatch([params.text], this.compiledPolicy);
@@ -110,12 +120,67 @@ class ModeratorImpl implements Moderator {
             }
           }
 
-          const resultVerdict: Verdict = {
+          let resultVerdict: Verdict = {
             action: rawVerdict.action,
             category: rawVerdict.category,
             confidence: rawVerdict.confidence,
             source: isPrimary ? "primary" : "fallback-provider",
           };
+
+          // Check if escalation is configured and confidence threshold is met
+          if (
+            isPrimary &&
+            this.config.escalation &&
+            resultVerdict.confidence < this.config.escalation.whenConfidenceBelow
+          ) {
+            this.statsStore.escalations++;
+
+            const escProvider = this.config.escalation.toProvider;
+            let escRawVerdict: RawVerdict | null = null;
+
+            for (let escAttempt = 1; escAttempt <= 2; escAttempt++) {
+              try {
+                if (this.config.batch) {
+                  const escBatcher = this.getBatcher(escProvider);
+                  escRawVerdict = await escBatcher.add(params.text);
+                } else {
+                  this.statsStore.apiCalls++;
+                  this.statsStore.estimatedInputTokens += Math.ceil(
+                    (this.compiledPolicy.length + params.text.length) / 4
+                  );
+                  this.statsStore.estimatedOutputTokens += 20;
+
+                  try {
+                    const results = await escProvider.moderateBatch(
+                      [params.text],
+                      this.compiledPolicy
+                    );
+                    const parsed = RawVerdictArraySchema.safeParse(results);
+                    if (!parsed.success || parsed.data.length !== 1) {
+                      this.statsStore.errors++;
+                      continue;
+                    }
+                    escRawVerdict = parsed.data[0];
+                  } catch {
+                    this.statsStore.errors++;
+                    continue;
+                  }
+                }
+                break;
+              } catch {
+                // Squelch and retry
+              }
+            }
+
+            if (escRawVerdict) {
+              resultVerdict = {
+                action: escRawVerdict.action,
+                category: escRawVerdict.category,
+                confidence: escRawVerdict.confidence,
+                source: "escalation",
+              };
+            }
+          }
 
           if (this.config.cache) {
             try {

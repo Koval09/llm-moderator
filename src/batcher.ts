@@ -13,14 +13,14 @@ export class Batcher {
   private compiledPolicy: string;
   private queue: BatchTask[] = [];
   private timeoutId: NodeJS.Timeout | null = null;
-  private onApiCall: (success: boolean) => void;
+  private onApiCall: (success: boolean, textCount: number, totalTextLength: number) => void;
 
   constructor(options: {
     provider: ModerationProvider;
     maxSize: number;
     maxWaitMs: number;
     compiledPolicy: string;
-    onApiCall: (success: boolean) => void;
+    onApiCall: (success: boolean, textCount: number, totalTextLength: number) => void;
   }) {
     this.provider = options.provider;
     this.maxSize = options.maxSize;
@@ -63,6 +63,9 @@ export class Batcher {
       return;
     }
 
+    const textCount = currentBatch.length;
+    const totalTextLength = currentBatch.reduce((sum, item) => sum + item.text.length, 0);
+
     try {
       const texts = currentBatch.map((item) => item.text);
       const results = await this.provider.moderateBatch(texts, this.compiledPolicy);
@@ -73,13 +76,13 @@ export class Batcher {
         throw new Error("Invalid batch response structure or length mismatch");
       }
 
-      this.onApiCall(true);
+      this.onApiCall(true, textCount, totalTextLength);
 
       for (let i = 0; i < currentBatch.length; i++) {
         currentBatch[i].resolve(parsed.data[i]);
       }
     } catch (error) {
-      this.onApiCall(false);
+      this.onApiCall(false, textCount, totalTextLength);
       for (const item of currentBatch) {
         item.reject(error);
       }
