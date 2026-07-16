@@ -63,7 +63,7 @@ async function run() {
       anthropic({ apiKey: anthropicKey, model: "claude-3-5-haiku-latest" })
     ),
     fallbackProviders: [
-      wrapProviderForErrors(openai({ apiKey: openAiKey, model: "gpt-4o-mini" })),
+      wrapProviderForErrors(openai({ apiKey: openAiKey || "", model: "gpt-4o-mini" })),
     ],
     policy,
     onError: "allow",
@@ -78,11 +78,11 @@ async function run() {
   console.log("=== SCENARIO 2: Caching, Escalation & Main Checks ===");
   // Escalation provider uses gpt5-mini (which will fail and fallback to primary verdict)
   const mainModerator = createModerator({
-    provider: wrapProviderForErrors(openai({ apiKey: openAiKey, model: "gpt-4o-mini" })),
+    provider: wrapProviderForErrors(openai({ apiKey: openAiKey || "", model: "gpt-4o-mini" })),
     policy,
     cache: memoryCache({ ttlMs: 10000 }),
     escalation: {
-      toProvider: wrapProviderForErrors(openai({ apiKey: openAiKey, model: "gpt-4o" })),
+      toProvider: wrapProviderForErrors(openai({ apiKey: openAiKey || "", model: "gpt-4o" })),
       // NOTE: A threshold of 0.95 is used here to force escalation in this smoke test.
       // In production, a lower threshold like 0.7 is recommended to avoid costly API calls.
       whenConfidenceBelow: 0.95,
