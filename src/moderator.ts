@@ -9,6 +9,7 @@ import {
 } from "./types.js";
 import { compilePolicy } from "./policy.js";
 import { Batcher } from "./batcher.js";
+import { normalizeText } from "./cache.js";
 
 class ModeratorImpl implements Moderator {
   private config: ModerationConfig;
@@ -22,6 +23,7 @@ class ModeratorImpl implements Moderator {
     escalations: 0,
     fallbackProviderCalls: 0,
     errors: 0,
+    cacheErrors: 0,
     estimatedInputTokens: 0,
     estimatedOutputTokens: 0,
   };
@@ -60,12 +62,13 @@ class ModeratorImpl implements Moderator {
     return batcher;
   }
 
-  async check(params: { text: string; userId?: string; chatId?: string }): Promise<Verdict> {
+  async check(params: { text: string }): Promise<Verdict> {
     this.statsStore.checked++;
+    const normalizedText = normalizeText(params.text);
 
     if (this.config.cache) {
       try {
-        const cached = await this.config.cache.get(params.text);
+        const cached = await this.config.cache.get(normalizedText);
         if (cached) {
           this.statsStore.cacheHits++;
           return {
@@ -74,7 +77,7 @@ class ModeratorImpl implements Moderator {
           };
         }
       } catch {
-        // Cache read errors should not break moderation
+        this.statsStore.cacheErrors++;
       }
     }
 
@@ -88,10 +91,13 @@ class ModeratorImpl implements Moderator {
 
       // Initial attempt + 1 retry = 2 attempts total
       for (let attempt = 1; attempt <= 2; attempt++) {
+        if (attempt > 1) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
         try {
           let rawVerdict: RawVerdict;
 
-          if (this.config.batch) {
+          if (this.config.batch && attempt === 1) {
             const batcher = this.getBatcher(provider);
             rawVerdict = await batcher.add(params.text);
           } else {
@@ -110,13 +116,12 @@ class ModeratorImpl implements Moderator {
               const results = await provider.moderateBatch([params.text], this.compiledPolicy);
               const parsed = RawVerdictArraySchema.safeParse(results);
               if (!parsed.success || parsed.data.length !== 1) {
-                this.statsStore.errors++;
-                continue;
+                throw new Error("Invalid response or length mismatch");
               }
               rawVerdict = parsed.data[0];
-            } catch {
+            } catch (err) {
               this.statsStore.errors++;
-              continue;
+              throw err;
             }
           }
 
@@ -139,8 +144,11 @@ class ModeratorImpl implements Moderator {
             let escRawVerdict: RawVerdict | null = null;
 
             for (let escAttempt = 1; escAttempt <= 2; escAttempt++) {
+              if (escAttempt > 1) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+              }
               try {
-                if (this.config.batch) {
+                if (this.config.batch && escAttempt === 1) {
                   const escBatcher = this.getBatcher(escProvider);
                   escRawVerdict = await escBatcher.add(params.text);
                 } else {
@@ -157,13 +165,12 @@ class ModeratorImpl implements Moderator {
                     );
                     const parsed = RawVerdictArraySchema.safeParse(results);
                     if (!parsed.success || parsed.data.length !== 1) {
-                      this.statsStore.errors++;
-                      continue;
+                      throw new Error("Invalid response or length mismatch");
                     }
                     escRawVerdict = parsed.data[0];
-                  } catch {
+                  } catch (err) {
                     this.statsStore.errors++;
-                    continue;
+                    throw err;
                   }
                 }
                 break;
@@ -184,15 +191,15 @@ class ModeratorImpl implements Moderator {
 
           if (this.config.cache) {
             try {
-              await this.config.cache.set(params.text, resultVerdict);
+              await this.config.cache.set(normalizedText, resultVerdict);
             } catch {
-              // Cache write errors should not break moderation
+              this.statsStore.cacheErrors++;
             }
           }
 
           return resultVerdict;
         } catch {
-          // If batcher rejected, we catch here and loop to the next attempt (retry)
+          // If batcher/direct rejected, we catch here and loop to the next attempt (retry)
         }
       }
     }

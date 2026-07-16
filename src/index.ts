@@ -4,5 +4,5 @@ export * from "./types.js";
 export { mockProvider } from "./providers/mock.js";
 export type { MockProviderFixtures } from "./providers/mock.js";
 export { memoryCache, normalizeText } from "./cache.js";
-export { anthropic } from "./providers/anthropic.js";
-export { openai } from "./providers/openai.js";
+export { anthropicProvider } from "./providers/anthropic.js";
+export { openaiProvider } from "./providers/openai.js";

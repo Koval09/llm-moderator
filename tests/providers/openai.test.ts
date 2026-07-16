@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openai } from "../../src/providers/openai.js";
+import { openaiProvider } from "../../src/providers/openai.js";
 
 const mockOpenAICallbacks = {
   shouldBeMissing: false,
   create: vi.fn(),
   shouldFailApi: false,
+  constructorCalls: 0,
 };
 
 vi.mock("openai", () => {
@@ -13,6 +14,9 @@ vi.mock("openai", () => {
       return undefined;
     }
     return class {
+      constructor() {
+        mockOpenAICallbacks.constructorCalls++;
+      }
       chat = {
         completions: {
           create: async (...args: unknown[]) => {
@@ -40,13 +44,14 @@ describe("OpenAI Provider", () => {
   beforeEach(() => {
     mockOpenAICallbacks.shouldBeMissing = false;
     mockOpenAICallbacks.shouldFailApi = false;
+    mockOpenAICallbacks.constructorCalls = 0;
     mockOpenAICallbacks.create.mockReset();
   });
 
   it("throws clear error when SDK is not installed/loaded", async () => {
     mockOpenAICallbacks.shouldBeMissing = true;
 
-    const provider = openai({ apiKey: "test-key" });
+    const provider = openaiProvider({ apiKey: "test-key" });
     await expect(provider.moderateBatch(["hello"], "policy")).rejects.toThrow(
       "To use the OpenAI provider, you must install the 'openai' package."
     );
@@ -63,23 +68,71 @@ describe("OpenAI Provider", () => {
       ],
     });
 
-    const provider = openai({ apiKey: "test-key", model: "custom-model" });
+    const provider = openaiProvider({ apiKey: "test-key", model: "custom-model" });
     const results = await provider.moderateBatch(["text1"], "my-policy");
 
     expect(results).toEqual([{ action: "allow", confidence: 0.95 }]);
-    expect(mockOpenAICallbacks.create).toHaveBeenCalledWith({
-      model: "custom-model",
-      messages: [
-        { role: "system", content: "my-policy" },
-        { role: "user", content: JSON.stringify(["text1"]) },
+    expect(mockOpenAICallbacks.create).toHaveBeenCalledWith(
+      {
+        model: "custom-model",
+        messages: [
+          { role: "system", content: "my-policy" },
+          { role: "user", content: JSON.stringify(["text1"]) },
+        ],
+      },
+      {
+        timeout: 10000,
+      }
+    );
+  });
+
+  it("sends correct timeoutMs option", async () => {
+    mockOpenAICallbacks.create.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify([{ action: "allow", confidence: 0.95 }]),
+          },
+        },
       ],
     });
+
+    const provider = openaiProvider({ apiKey: "test-key", timeoutMs: 5000 });
+    await provider.moderateBatch(["text1"], "my-policy");
+
+    expect(mockOpenAICallbacks.create).toHaveBeenCalledWith(
+      expect.any(Object),
+      {
+        timeout: 5000,
+      }
+    );
+  });
+
+  it("lazily instantiates client only once", async () => {
+    mockOpenAICallbacks.create.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify([{ action: "allow", confidence: 0.95 }]),
+          },
+        },
+      ],
+    });
+
+    const provider = openaiProvider({ apiKey: "test-key" });
+    expect(mockOpenAICallbacks.constructorCalls).toBe(0);
+
+    await provider.moderateBatch(["text1"], "my-policy");
+    expect(mockOpenAICallbacks.constructorCalls).toBe(1);
+
+    await provider.moderateBatch(["text2"], "my-policy");
+    expect(mockOpenAICallbacks.constructorCalls).toBe(1); // Still 1!
   });
 
   it("handles API/network errors", async () => {
     mockOpenAICallbacks.shouldFailApi = true;
 
-    const provider = openai({ apiKey: "test-key" });
+    const provider = openaiProvider({ apiKey: "test-key" });
     await expect(provider.moderateBatch(["hello"], "policy")).rejects.toThrow(
       "Rate limit exceeded"
     );

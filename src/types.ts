@@ -67,11 +67,12 @@ export interface ModeratorStats {
   escalations: number;
   fallbackProviderCalls: number;
   errors: number;
+  cacheErrors: number;
   estimatedInputTokens: number;
   estimatedOutputTokens: number;
 }
 
 export interface Moderator {
-  check(params: { text: string; userId?: string; chatId?: string }): Promise<Verdict>;
+  check(params: { text: string }): Promise<Verdict>;
   stats(): ModeratorStats;
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createModerator } from "../src/moderator.js";
 import { mockProvider } from "../src/providers/mock.js";
+import { Batcher } from "../src/batcher.js";
 
 describe("Batcher", () => {
   beforeEach(() => {
@@ -126,6 +127,10 @@ describe("Batcher", () => {
     const promise1 = moderator.check({ text: "t1" });
     const promise2 = moderator.check({ text: "t2" });
 
+    // Let the batch call fail and bypass the 300ms retry delay
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(300);
+
     const [result1, result2] = await Promise.all([promise1, promise2]);
 
     expect(result1.action).toBe("allow");
@@ -134,8 +139,54 @@ describe("Batcher", () => {
     expect(result2.source).toBe("fallback-provider");
 
     const stats = moderator.stats();
-    expect(stats.errors).toBe(2); // primary failed twice (initial + retry)
-    expect(stats.apiCalls).toBe(3); // 2 primary batch calls (initial + retry) + 1 fallback batch call
-    expect(stats.batches).toBe(3);
+    expect(stats.errors).toBe(3); // 1 primary batch failed + 2 primary direct retries failed
+    expect(stats.apiCalls).toBe(4); // 1 primary batch + 2 primary direct + 1 fallback batch
+    expect(stats.batches).toBe(2); // 1 primary batch + 1 fallback batch
+  });
+
+  it("concurrent batch flushes do not mix or contaminate", async () => {
+    const provider = mockProvider({
+      a1: { action: "allow", confidence: 0.9 },
+      a2: { action: "block", confidence: 0.9 },
+      b1: { action: "allow", confidence: 0.8 },
+      b2: { action: "block", confidence: 0.8 },
+    });
+
+    const moderator = createModerator({
+      provider,
+      policy: { block: [] },
+      batch: { maxSize: 2, maxWaitMs: 100 },
+    });
+
+    const p_a1 = moderator.check({ text: "a1" });
+    const p_a2 = moderator.check({ text: "a2" });
+
+    const p_b1 = moderator.check({ text: "b1" });
+    const p_b2 = moderator.check({ text: "b2" });
+
+    const [res_a1, res_a2, res_b1, res_b2] = await Promise.all([p_a1, p_a2, p_b1, p_b2]);
+
+    expect(res_a1.confidence).toBe(0.9);
+    expect(res_a2.confidence).toBe(0.9);
+    expect(res_b1.confidence).toBe(0.8);
+    expect(res_b2.confidence).toBe(0.8);
+  });
+
+  it("safely handles flush errors without causing unhandled promise rejections", async () => {
+    const provider = mockProvider({
+      fail: "error",
+    });
+
+    const batcher = new Batcher({
+      provider,
+      maxSize: 1,
+      maxWaitMs: 100,
+      compiledPolicy: "policy",
+      onApiCall: () => {
+        throw new Error("Callback Error");
+      },
+    });
+
+    await expect(batcher.add("fail")).rejects.toThrow();
   });
 });

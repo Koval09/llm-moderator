@@ -34,7 +34,7 @@ export class Batcher {
       this.queue.push({ text, resolve, reject });
 
       if (this.queue.length >= this.maxSize) {
-        this.flush();
+        this.flush().catch(() => {});
       } else if (this.queue.length === 1) {
         this.startTimer();
       }
@@ -46,7 +46,7 @@ export class Batcher {
       clearTimeout(this.timeoutId);
     }
     this.timeoutId = setTimeout(() => {
-      this.flush();
+      this.flush().catch(() => {});
     }, this.maxWaitMs);
   }
 
@@ -82,14 +82,23 @@ export class Batcher {
         currentBatch[i].resolve(parsed.data[i]);
       }
     } catch (error) {
-      this.onApiCall(false, textCount, totalTextLength);
+      try {
+        this.onApiCall(false, textCount, totalTextLength);
+      } catch {
+        // Prevent onApiCall exception from shadowing original error
+      }
       for (const item of currentBatch) {
         item.reject(error);
       }
+      throw error;
     }
   }
 
   // Helper method to clear timers when disposing or in tests
+  /**
+   * Clears the current batch queue and cancels the active timer.
+   * Note: This does NOT abort or cancel any batch requests that are already in-flight.
+   */
   clear() {
     if (this.timeoutId) {
       clearTimeout(this.timeoutId);

@@ -8,8 +8,11 @@ describe("Cache", () => {
     it("normalizes cases, spaces, repeated characters and punctuation", () => {
       expect(normalizeText("Привет!!!")).toBe("привет");
       expect(normalizeText("привет")).toBe("привет");
-      expect(normalizeText("  HELLO   world!!!  ")).toBe("helo world");
-      expect(normalizeText("wwoorrllldd")).toBe("world");
+      expect(normalizeText("  HELLO   world!!!  ")).toBe("hello world");
+      expect(normalizeText("wwoorrllldd")).toBe("wwoorrlldd");
+      expect(normalizeText("good")).toBe("good");
+      expect(normalizeText("god")).toBe("god");
+      expect(normalizeText("gooood")).toBe("good");
     });
   });
 
@@ -44,8 +47,8 @@ describe("Cache", () => {
       const cache = memoryCache({ ttlMs: 1000 });
       const verdict = { action: "block", confidence: 0.8, source: "primary" } as const;
 
-      await cache.set("Привет!!!", verdict);
-      expect(await cache.get("привет")).toEqual(verdict);
+      await cache.set(normalizeText("Привет!!!"), verdict);
+      expect(await cache.get(normalizeText("привет"))).toEqual(verdict);
     });
 
     it("respects maxEntries eviction of oldest entries", async () => {
@@ -121,17 +124,56 @@ describe("Cache", () => {
       });
 
       // Call 1: fails, falls back to error-fallback
-      const res1 = await moderator.check({ text: "broken" });
+      const resPromise1 = moderator.check({ text: "broken" });
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(300);
+      const res1 = await resPromise1;
       expect(res1).toEqual({ action: "block", confidence: 0, source: "error-fallback" });
 
       // Call 2: should miss again since we don't cache error-fallback
-      const res2 = await moderator.check({ text: "broken" });
+      const resPromise2 = moderator.check({ text: "broken" });
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(300);
+      const res2 = await resPromise2;
       expect(res2).toEqual({ action: "block", confidence: 0, source: "error-fallback" });
 
       const stats = moderator.stats();
       expect(stats.checked).toBe(2);
       expect(stats.cacheHits).toBe(0);
       expect(stats.errors).toBe(4); // 2 attempts per call
+    });
+
+    it("works with an asynchronous cache implementation", async () => {
+      vi.useRealTimers();
+      const store = new Map<string, unknown>();
+      const customCache = {
+        async get(key: string) {
+          await Promise.resolve();
+          return store.get(key) || null;
+        },
+        async set(key: string, value: unknown) {
+          await Promise.resolve();
+          store.set(key, value);
+        },
+      };
+
+      const provider = mockProvider({
+        hello: { action: "allow", confidence: 0.99 },
+      });
+
+      const moderator = createModerator({
+        provider,
+        policy: { block: [] },
+        cache: customCache,
+      });
+
+      const res1 = await moderator.check({ text: "hello" });
+      expect(res1).toEqual({ action: "allow", confidence: 0.99, source: "primary" });
+      expect(store.get("hello")).toEqual({ action: "allow", confidence: 0.99, source: "primary" });
+
+      const res2 = await moderator.check({ text: "hello" });
+      expect(res2).toEqual({ action: "allow", confidence: 0.99, source: "cache" });
+      vi.useFakeTimers();
     });
   });
 });

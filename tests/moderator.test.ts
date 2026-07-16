@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createModerator } from "../src/moderator.js";
 import { mockProvider } from "../src/providers/mock.js";
 import { ModerationProvider, ModerationAction } from "../src/types.js";
@@ -339,9 +339,81 @@ describe("Moderator", () => {
       // Scenario 5: 2 errors (primary failed twice) + 2 errors (fallback failed twice) = 4 errors
       // Total errors = 2 + 4 = 6
       expect(stats.errors).toBe(6);
+      expect(stats.cacheErrors).toBe(0);
 
       expect(stats.estimatedInputTokens).toBeGreaterThan(0);
       expect(stats.estimatedOutputTokens).toBe(10 * 20); // 10 apiCalls * 20 tokens/call
+    });
+  });
+
+  describe("Cache errors tracking", () => {
+    it("increments cacheErrors on cache get/set throw while keeping check functioning", async () => {
+      const faultyCache = {
+        async get() {
+          throw new Error("Read Cache Failed");
+        },
+        async set() {
+          throw new Error("Write Cache Failed");
+        },
+      };
+
+      const provider = mockProvider({
+        test: { action: "allow", confidence: 0.9 },
+      });
+
+      const moderator = createModerator({
+        provider,
+        policy: defaultPolicy,
+        cache: faultyCache,
+      });
+
+      const result = await moderator.check({ text: "test" });
+      expect(result.action).toBe("allow");
+
+      const stats = moderator.stats();
+      expect(stats.cacheErrors).toBe(2); // 1 error from get, 1 error from set
+    });
+  });
+
+  describe("Retry delay integration", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("delays the second attempt by 300ms", async () => {
+      let callCount = 0;
+      const transientProvider = {
+        name: "transient",
+        async moderateBatch() {
+          callCount++;
+          if (callCount === 1) {
+            throw new Error("Transient Error");
+          }
+          return [{ action: "allow" as ModerationAction, confidence: 0.9 }];
+        },
+      };
+
+      const moderator = createModerator({
+        provider: transientProvider,
+        policy: defaultPolicy,
+      });
+
+      const checkPromise = moderator.check({ text: "test" });
+
+      await vi.runAllTicks();
+      expect(callCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(299);
+      expect(callCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await checkPromise;
+      expect(result.action).toBe("allow");
+      expect(callCount).toBe(2);
     });
   });
 });

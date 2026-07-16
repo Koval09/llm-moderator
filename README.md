@@ -35,10 +35,10 @@ npm install @anthropic-ai/sdk
 Here is a quick example using the OpenAI provider:
 
 ```typescript
-import { createModerator, openai, memoryCache } from "llm-moderator";
+import { createModerator, openaiProvider, memoryCache } from "llm-moderator";
 
 const moderator = createModerator({
-  provider: openai({ apiKey: process.env.OPENAI_API_KEY || "", model: "gpt-4o-mini" }),
+  provider: openaiProvider({ apiKey: process.env.OPENAI_API_KEY || "", model: "gpt-4o-mini" }),
   policy: {
     block: [
       "real threats of violence and physical harm",
@@ -68,7 +68,7 @@ run();
 
 | Option | Type | Required | Description |
 | --- | --- | --- | --- |
-| `provider` | `ModerationProvider` | Yes | The primary LLM provider (e.g., `openai`, `anthropic`, `mockProvider`). |
+| `provider` | `ModerationProvider` | Yes | The primary LLM provider (e.g., `openaiProvider`, `anthropicProvider`, `mockProvider`). |
 | `fallbackProviders` | `ModerationProvider[]` | No | Fallback providers tried in order if the primary provider fails. |
 | `policy` | `Object` | Yes | Custom moderation guidelines. |
 | `policy.block` | `string[]` | Yes | Categories of content to block. |
@@ -120,7 +120,7 @@ async function checkChat() {
 
 To moderate **100k messages/day** in production, running raw high-end LLM requests is prohibitively expensive and slow. `llm-moderator` optimizes this with a layered cost stack:
 
-1. **Normalized Cache**: Built-in memory cache normalizes text (e.g. collapses `"HELLO!!!"` and `"hello"`) to hit cached verdicts without calling the LLM.
+1. **Normalized Cache**: The moderator normalizes text before caching. Keys are normalized (lowercased, trimmed, punctuation removed, and repeating characters of length 3 or more are collapsed to two, e.g. `"gooood"` collapses to `"good"`, but `"good"` remains distinct from `"god"`). This is a deliberate trade-off to catch spam elongation while avoiding collision on common words.
 2. **Batching**: Collects requests for up to `maxWaitMs` and sends them as one request to optimize token overhead.
 3. **Escalation**: Uses a cheap model (like `gpt-4o-mini` at $0.15/1M tokens) for 95% of checks, and only escalates to a high-end model (like `gpt-4o` at $5.00/1M tokens) when confidence falls below the threshold.
 
@@ -159,10 +159,10 @@ LLM-based content moderation should be the **last line of defense** because it i
 ### Integration Pseudocode
 
 ```typescript
-import { createModerator, openai, memoryCache } from "llm-moderator";
+import { createModerator, openaiProvider, memoryCache } from "llm-moderator";
 
 const moderator = createModerator({
-  provider: openai({ apiKey: process.env.OPENAI_API_KEY || "" }),
+  provider: openaiProvider({ apiKey: process.env.OPENAI_API_KEY || "" }),
   policy: { block: ["harassment"] }
 });
 
@@ -209,10 +209,10 @@ async function handleIncomingMessage(userId: string, text: string) {
 ## FAQ
 
 ### Which model should I use?
-We recommend starting with `gpt-4o-mini` (via `openai`) or `claude-3-5-haiku-latest` (via `anthropic`) as your primary provider. They are fast, extremely cheap, and yield high accuracy for standard moderation tasks.
+We recommend starting with `gpt-4o-mini` (via `openaiProvider`) or `claude-3-5-haiku-latest` (via `anthropicProvider`) as your primary provider. They are fast, extremely cheap, and yield high accuracy for standard moderation tasks.
 
 ### How do I plug in Redis?
-You can implement the `ModerationCache` interface to connect Redis:
+You can implement the `ModerationCache` interface to connect Redis. Note that keys are automatically normalized by the moderator before being passed to custom cache methods:
 
 ```typescript
 import { ModerationCache, Verdict } from "llm-moderator";
@@ -222,10 +222,12 @@ const redisClient = createClient();
 
 const redisCache: ModerationCache = {
   async get(key: string): Promise<Verdict | null> {
+    // The key parameter is already normalized by the moderator (e.g. lowercased, collapsed)
     const data = await redisClient.get(`mod:${key}`);
     return data ? JSON.parse(data) : null;
   },
   async set(key: string, value: Verdict): Promise<void> {
+    // The key parameter is already normalized by the moderator
     await redisClient.setEx(`mod:${key}`, 3600, JSON.stringify(value)); // 1 hour TTL
   }
 };
