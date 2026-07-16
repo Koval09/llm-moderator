@@ -1,4 +1,4 @@
-import { ModerationProvider, RawVerdict } from "../types.js";
+import { ModerationProvider, RawVerdict, ModerationAction } from "../types.js";
 
 export interface MockProviderFixtures {
   [text: string]: Partial<RawVerdict> | "error" | "invalid";
