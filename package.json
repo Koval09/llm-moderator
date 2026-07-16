@@ -51,8 +51,10 @@
     }
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.25.0",
     "@types/node": "^20.14.9",
     "eslint": "^9.6.0",
+    "openai": "^4.52.0",
     "prettier": "^3.3.2",
     "tsup": "^8.1.0",
     "typescript": "^5.5.2",
