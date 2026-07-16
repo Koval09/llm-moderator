@@ -73,7 +73,6 @@ describe("OpenAI Provider", () => {
         { role: "system", content: "my-policy" },
         { role: "user", content: JSON.stringify(["text1"]) },
       ],
-      response_format: { type: "json_object" },
     });
   });
 

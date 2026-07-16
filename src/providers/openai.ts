@@ -48,7 +48,6 @@ export function openai(options: { apiKey: string; model?: string }): ModerationP
             content: JSON.stringify(texts),
           },
         ],
-        response_format: { type: "json_object" },
       });
 
       const responseText = response.choices[0]?.message?.content || "";
