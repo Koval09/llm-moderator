@@ -58,6 +58,21 @@ class ModeratorImpl implements Moderator {
   async check(params: { text: string; userId?: string; chatId?: string }): Promise<Verdict> {
     this.statsStore.checked++;
 
+    if (this.config.cache) {
+      try {
+        const cached = await this.config.cache.get(params.text);
+        if (cached) {
+          this.statsStore.cacheHits++;
+          return {
+            ...cached,
+            source: "cache",
+          };
+        }
+      } catch {
+        // Cache read errors should not break moderation
+      }
+    }
+
     const providersToTry = [
       { provider: this.config.provider, isPrimary: true },
       ...(this.config.fallbackProviders || []).map((p) => ({ provider: p, isPrimary: false })),
@@ -95,12 +110,22 @@ class ModeratorImpl implements Moderator {
             }
           }
 
-          return {
+          const resultVerdict: Verdict = {
             action: rawVerdict.action,
             category: rawVerdict.category,
             confidence: rawVerdict.confidence,
             source: isPrimary ? "primary" : "fallback-provider",
           };
+
+          if (this.config.cache) {
+            try {
+              await this.config.cache.set(params.text, resultVerdict);
+            } catch {
+              // Cache write errors should not break moderation
+            }
+          }
+
+          return resultVerdict;
         } catch {
           // If batcher rejected, we catch here and loop to the next attempt (retry)
         }
