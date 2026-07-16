@@ -5,8 +5,8 @@ export function normalizeText(text: string): string {
   s = s.replace(/\s+/g, " ");
   // Collapse repeating characters
   s = s.replace(/(.)\1+/g, "$1");
-  // Remove non-alphanumeric characters (including punctuation) to make "Привет!!!" and "привет" identical
-  s = s.replace(/[^a-z0-9а-яё\s]/gu, "");
+  // Remove non-alphanumeric characters (Unicode-safe for all languages) and punctuation
+  s = s.replace(/[^\p{L}\p{N}\s]/gu, "");
   return s.trim().replace(/\s+/g, " ");
 }
 
